@@ -1,0 +1,4 @@
+channel,correlation_with_earnings_growth,beta_to_earnings_growth,avg_growth_earnings_up_pct,avg_growth_earnings_down_pct,earnings_up_years,earnings_down_years
+dividends,0.26,0.03,6.0,5.0,7,2
+buybacks,0.84,1.06,15.8,-12.0,7,2
+total_payout,0.81,0.59,10.7,-5.3,7,2

@@ -3,7 +3,8 @@ import statistics
 import unittest
 
 from buybacks_vs_dividends import (
-    PAYOUT, build_counterfactual, build_growth, build_rows, public_rows,
+    PAYOUT, build_counterfactual, build_growth, build_responsiveness,
+    build_rows, public_rows,
 )
 
 
@@ -100,6 +101,94 @@ class TestCounterfactual(unittest.TestCase):
         self.assertEqual(worst["year"], 2020)
         self.assertAlmostEqual(worst["cumulative_excess_$B"], -244.5,
                                places=0)
+
+
+class TestResponsiveness(unittest.TestCase):
+    def setUp(self):
+        self.resp = build_responsiveness(build_rows())
+        self.by_channel = {r["channel"]: r for r in self.resp}
+
+    def test_three_channels_in_order(self):
+        self.assertEqual([r["channel"] for r in self.resp],
+                         ["dividends", "buybacks", "total_payout"])
+
+    def test_up_down_year_counts(self):
+        # Earnings rose in 7 growth years and fell in 2 (2020, 2022).
+        for r in self.resp:
+            self.assertEqual(r["earnings_up_years"], 7)
+            self.assertEqual(r["earnings_down_years"], 2)
+
+    def test_buybacks_track_earnings_dividends_do_not(self):
+        buy = self.by_channel["buybacks"]
+        div = self.by_channel["dividends"]
+        self.assertAlmostEqual(
+            buy["correlation_with_earnings_growth"], 0.84, places=1)
+        self.assertAlmostEqual(buy["beta_to_earnings_growth"], 1.06,
+                               places=1)
+        self.assertAlmostEqual(
+            div["correlation_with_earnings_growth"], 0.26, places=1)
+        self.assertAlmostEqual(div["beta_to_earnings_growth"], 0.03,
+                               places=1)
+        self.assertGreater(buy["beta_to_earnings_growth"],
+                           10 * div["beta_to_earnings_growth"])
+
+    def test_total_payout_sits_between_channels(self):
+        total = self.by_channel["total_payout"]
+        self.assertAlmostEqual(total["beta_to_earnings_growth"], 0.59,
+                               places=1)
+        self.assertGreater(total["beta_to_earnings_growth"],
+                           self.by_channel["dividends"]
+                           ["beta_to_earnings_growth"])
+        self.assertLess(total["beta_to_earnings_growth"],
+                        self.by_channel["buybacks"]
+                        ["beta_to_earnings_growth"])
+
+    def test_up_down_split(self):
+        buy = self.by_channel["buybacks"]
+        div = self.by_channel["dividends"]
+        # Buybacks were cut on average when earnings fell; dividends
+        # still grew (2020 -0.5% and 2022 +10.4% average to +5.0%).
+        self.assertAlmostEqual(buy["avg_growth_earnings_up_pct"], 15.8,
+                               places=0)
+        self.assertAlmostEqual(buy["avg_growth_earnings_down_pct"], -12.0,
+                               places=0)
+        self.assertAlmostEqual(div["avg_growth_earnings_down_pct"], 5.0,
+                               places=0)
+
+    def test_synthetic_proportional_channel(self):
+        # Buyback growth is exactly 2x earnings growth each year
+        # (+20/-20/+20 vs +10/-10/+10), dividends exactly 1x: beta and
+        # correlation must come back 2.0/1.0 and 1.0/1.0.
+        rows = build_rows([
+            (2000, 100.0, 100.0, 100.0),
+            (2001, 110.0, 120.0, 110.0),
+            (2002, 99.0, 96.0, 99.0),
+            (2003, 108.9, 115.2, 108.9),
+        ])
+        by_channel = {r["channel"]: r for r in build_responsiveness(rows)}
+        self.assertAlmostEqual(
+            by_channel["buybacks"]["beta_to_earnings_growth"], 2.0,
+            places=2)
+        self.assertAlmostEqual(
+            by_channel["buybacks"]["correlation_with_earnings_growth"],
+            1.0, places=2)
+        self.assertAlmostEqual(
+            by_channel["dividends"]["beta_to_earnings_growth"], 1.0,
+            places=2)
+
+    def test_constant_channel_has_no_beta(self):
+        # A channel that never grows has zero variance: beta/corr are
+        # None, never a crash or a fake 0.
+        rows = build_rows([
+            (2000, 100.0, 100.0, 100.0),
+            (2001, 100.0, 120.0, 110.0),
+            (2002, 100.0, 96.0, 99.0),
+        ])
+        by_channel = {r["channel"]: r for r in build_responsiveness(rows)}
+        self.assertIsNone(
+            by_channel["dividends"]["beta_to_earnings_growth"])
+        self.assertIsNone(
+            by_channel["dividends"]["correlation_with_earnings_growth"])
 
 
 if __name__ == "__main__":

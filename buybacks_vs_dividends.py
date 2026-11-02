@@ -22,6 +22,13 @@ Findings hinge on four derived measures:
   Because both channels share the same 9-year CAGR, the counterfactual
   isolates timing: how far actual buybacks ran ahead of or behind a
   smooth path, and whether the decade total actually changed.
+- earnings responsiveness (v3): correlation and regression beta of
+  each channel's growth on operating-earnings growth, plus average
+  growth in earnings-up years vs earnings-down years. Volatility (v1)
+  says buybacks move more; responsiveness says what they move WITH --
+  earnings -- and how much of the move dividends simply do not make.
+  Only 9 growth years (7 up, 2 down), so this is a description of this
+  decade, not a fitted forecasting model.
 """
 
 import csv
@@ -135,6 +142,57 @@ def build_counterfactual(rows):
     return out
 
 
+def _raw_growth(rows, key):
+    """Unrounded year-over-year growth (%) for a row field, 2016 on."""
+    return [(rows[i][key] / rows[i - 1][key] - 1) * 100
+            for i in range(1, len(rows))]
+
+
+def build_responsiveness(rows):
+    """How strongly each payout channel's growth tracks earnings growth.
+
+    Beta is the OLS slope of channel growth on operating-earnings
+    growth (both unrounded): a beta near 1 means the channel moves
+    roughly point-for-point with earnings, near 0 means it grows on
+    its own schedule regardless. The up/down split is the same point
+    without any regression: average channel growth in the years
+    earnings rose vs the years they fell.
+    """
+    earn = _raw_growth(rows, "_op_earnings_$B")
+    channels = [
+        ("dividends", "dividends_$B"),
+        ("buybacks", "buybacks_$B"),
+        ("total_payout", "total_payout_$B"),
+    ]
+    out = []
+    mean_e = statistics.mean(earn)
+    var_e = sum((e - mean_e) ** 2 for e in earn)
+    for name, key in channels:
+        growth = _raw_growth(rows, key)
+        mean_g = statistics.mean(growth)
+        cov = sum((e - mean_e) * (g - mean_g) for e, g in zip(earn, growth))
+        var_g = sum((g - mean_g) ** 2 for g in growth)
+        if var_e == 0 or var_g == 0:
+            corr, beta = None, None
+        else:
+            corr = round(cov / (var_e * var_g) ** 0.5, 2)
+            beta = round(cov / var_e, 2)
+        up = [g for e, g in zip(earn, growth) if e > 0]
+        down = [g for e, g in zip(earn, growth) if e < 0]
+        out.append({
+            "channel": name,
+            "correlation_with_earnings_growth": corr,
+            "beta_to_earnings_growth": beta,
+            "avg_growth_earnings_up_pct": (
+                round(statistics.mean(up), 1) if up else None),
+            "avg_growth_earnings_down_pct": (
+                round(statistics.mean(down), 1) if down else None),
+            "earnings_up_years": len(up),
+            "earnings_down_years": len(down),
+        })
+    return out
+
+
 def fred_sp500_check():
     """Lightweight sanity check that FRED is reachable and returns S&P 500
     data (daily close, series SP500). This is context only -- the payout
@@ -163,6 +221,7 @@ def main():
     rows = build_rows()
     growth = build_growth(rows)
     counter = build_counterfactual(rows)
+    response = build_responsiveness(rows)
 
     div_g = [g["dividend_growth_pct"] for g in growth]
     buy_g = [g["buyback_growth_pct"] for g in growth]
@@ -184,6 +243,7 @@ def main():
     _write_csv(os.path.join(HERE, "results.csv"), public_rows(rows))
     _write_csv(os.path.join(HERE, "growth.csv"), growth)
     _write_csv(os.path.join(HERE, "counterfactual.csv"), counter)
+    _write_csv(os.path.join(HERE, "responsiveness.csv"), response)
 
     # Chart 1: stacked payout mix over time (unchanged from v1).
     years = [r["year"] for r in rows]
@@ -226,6 +286,29 @@ def main():
     fig.savefig(os.path.join(HERE, "counterfactual.png"), dpi=150)
     plt.close(fig)
 
+    # Chart 3: each channel's growth against earnings growth (the v3
+    # responsiveness cut). Buybacks scatter along the earnings axis;
+    # dividends sit in a flat band whatever earnings do.
+    fig, ax = plt.subplots(figsize=(10, 6))
+    earn_g = [g["operating_earnings_growth_pct"] for g in growth]
+    ax.scatter(earn_g, [g["buyback_growth_pct"] for g in growth],
+               color="#ff7f0e", s=70, label="Buybacks")
+    ax.scatter(earn_g, [g["dividend_growth_pct"] for g in growth],
+               color="#1f77b4", s=70, label="Dividends")
+    for g in growth:
+        ax.annotate(str(g["year"]), (g["operating_earnings_growth_pct"],
+                                     g["buyback_growth_pct"]),
+                    textcoords="offset points", xytext=(4, 4), fontsize=7)
+    ax.axhline(0, color="black", linewidth=0.8)
+    ax.axvline(0, color="black", linewidth=0.8)
+    ax.set_xlabel("Operating earnings growth, %")
+    ax.set_ylabel("Payout channel growth, %")
+    ax.set_title("Payout growth vs earnings growth, 2016-2024")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(os.path.join(HERE, "responsiveness.png"), dpi=150)
+    plt.close(fig)
+
     print("\nHeadline numbers:")
     print(f"  Total payout 2024: ${rows[-1]['total_payout_$B']:,.1f}B "
           f"(record; dividends ${rows[-1]['dividends_$B']:,.1f}B, "
@@ -255,13 +338,26 @@ def main():
           f"${total_cf:,.0f}B smooth vs ${total_buy:,.0f}B actual "
           f"({total_buy - total_cf:+,.0f}B); deepest cumulative timing "
           f"gap ${worst['cumulative_excess_$B']:,.2f}B at end-{worst['year']}")
+    resp = {r["channel"]: r for r in response}
+    print(f"  Earnings responsiveness: buyback growth beta "
+          f"{resp['buybacks']['beta_to_earnings_growth']:.2f} / correlation "
+          f"{resp['buybacks']['correlation_with_earnings_growth']:.2f} vs "
+          f"dividends beta {resp['dividends']['beta_to_earnings_growth']:.2f} "
+          f"/ correlation "
+          f"{resp['dividends']['correlation_with_earnings_growth']:.2f}; "
+          f"in the {resp['buybacks']['earnings_down_years']} earnings-down "
+          f"years buybacks averaged "
+          f"{resp['buybacks']['avg_growth_earnings_down_pct']:+.1f}% while "
+          f"dividends averaged "
+          f"{resp['dividends']['avg_growth_earnings_down_pct']:+.1f}%")
     print("\n  FRED context check:")
     check = fred_sp500_check()
     if check:
         print(f"  {check[0]}: {check[3]} daily observations, "
               f"{check[1]} to {check[2]} (sanity context only)")
     print("\nWrote results.csv, growth.csv, counterfactual.csv, "
-          "results.png and counterfactual.png")
+          "responsiveness.csv, results.png, counterfactual.png and "
+          "responsiveness.png")
 
 
 if __name__ == "__main__":
