@@ -3,8 +3,8 @@ import statistics
 import unittest
 
 from buybacks_vs_dividends import (
-    PAYOUT, build_counterfactual, build_growth, build_responsiveness,
-    build_rows, public_rows,
+    ERAS, PAYOUT, build_counterfactual, build_cumulative, build_eras,
+    build_growth, build_responsiveness, build_rows, public_rows,
 )
 
 
@@ -189,6 +189,90 @@ class TestResponsiveness(unittest.TestCase):
             by_channel["dividends"]["beta_to_earnings_growth"])
         self.assertIsNone(
             by_channel["dividends"]["correlation_with_earnings_growth"])
+
+
+class TestCumulativeEras(unittest.TestCase):
+    def setUp(self):
+        self.rows = build_rows()
+        self.cum = build_cumulative(self.rows)
+        self.eras = build_eras(self.rows)
+        self.by_era = {e["era"]: e for e in self.eras}
+
+    def test_cumulative_first_year_equals_annual(self):
+        # Cumulation starts at the 2015 annual row itself, so the first
+        # cumulative payout ratio is the 2015 annual ratio (107.8%).
+        first = self.cum[0]
+        self.assertEqual(first["cumulative_total_payout_$B"], 954.48)
+        self.assertAlmostEqual(first["cumulative_payout_ratio_pct"],
+                               107.8, places=0)
+
+    def test_cumulative_is_running_sum(self):
+        run_payout = run_earn = 0.0
+        for c, r in zip(self.cum, self.rows):
+            run_payout += r["total_payout_$B"]
+            run_earn += r["_op_earnings_$B"]
+            self.assertAlmostEqual(c["cumulative_total_payout_$B"],
+                                   run_payout, places=1)
+            self.assertAlmostEqual(
+                c["cumulative_operating_earnings_$B"], run_earn, places=1)
+
+    def test_cumulative_endpoint_matches_decade_totals(self):
+        last = self.cum[-1]
+        self.assertAlmostEqual(last["cumulative_total_payout_$B"],
+                               12142.88, places=1)
+        self.assertAlmostEqual(
+            last["cumulative_operating_earnings_$B"], 13649.99, places=1)
+        # The decade paid out 89.0% of what it earned, even though the
+        # first year alone paid out 107.8%.
+        self.assertAlmostEqual(last["cumulative_payout_ratio_pct"],
+                               89.0, places=0)
+        self.assertAlmostEqual(last["cumulative_buyback_share_pct"],
+                               59.5, places=0)
+
+    def test_era_rows_cover_decade_exactly_once(self):
+        parts = [e for e in self.eras if e["era"] != ERAS[-1][0]]
+        self.assertEqual(sum(e["years"] for e in parts), 10)
+        full = self.by_era[ERAS[-1][0]]
+        self.assertAlmostEqual(
+            sum(e["total_payout_$B"] for e in parts),
+            full["total_payout_$B"], places=1)
+        self.assertAlmostEqual(
+            sum(e["buybacks_$B"] for e in parts),
+            full["buybacks_$B"], places=1)
+
+    def test_era_buyback_share_is_stable(self):
+        # The v4 headline: pooled by era the mix barely moves, even
+        # though the annual share ranges 51.8% to 63.9%.
+        shares = [self.by_era[name]["buyback_share_pct"]
+                  for name, _, _ in ERAS[:3]]
+        self.assertAlmostEqual(shares[0], 59.6, places=0)
+        self.assertAlmostEqual(shares[1], 59.9, places=0)
+        self.assertAlmostEqual(shares[2], 58.8, places=0)
+        self.assertLess(max(shares) - min(shares), 2.0)
+        annual = [r["buyback_share_pct"] for r in self.rows]
+        self.assertGreater(max(annual) - min(annual), 10.0)
+
+    def test_era_payout_ratio_falls(self):
+        ratios = [self.by_era[name]["payout_ratio_op_earnings_pct"]
+                  for name, _, _ in ERAS[:3]]
+        self.assertAlmostEqual(ratios[0], 97.2, places=0)
+        self.assertAlmostEqual(ratios[1], 87.5, places=0)
+        self.assertAlmostEqual(ratios[2], 78.7, places=0)
+        self.assertEqual(ratios, sorted(ratios, reverse=True))
+
+    def test_era_hand_math_pre_pandemic(self):
+        # 2015-2019 pooled by hand from PAYOUT.
+        sel = [p for p in PAYOUT if 2015 <= p[0] <= 2019]
+        div = sum(p[1] for p in sel)
+        buy = sum(p[2] for p in sel)
+        earn = sum(p[3] for p in sel)
+        era = self.by_era[ERAS[0][0]]
+        self.assertAlmostEqual(era["dividends_$B"], div, places=1)
+        self.assertAlmostEqual(era["buybacks_$B"], buy, places=1)
+        self.assertAlmostEqual(era["payout_ratio_op_earnings_pct"],
+                               (div + buy) / earn * 100, places=0)
+        self.assertAlmostEqual(era["avg_annual_payout_$B"],
+                               (div + buy) / 5, places=1)
 
 
 if __name__ == "__main__":

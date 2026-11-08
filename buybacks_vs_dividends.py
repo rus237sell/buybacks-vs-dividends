@@ -29,6 +29,14 @@ Findings hinge on four derived measures:
   earnings -- and how much of the move dividends simply do not make.
   Only 9 growth years (7 up, 2 down), so this is a description of this
   decade, not a fitted forecasting model.
+- cumulative / era lens (v4): yearly rows cumulated from 2015
+  (cumulative payout vs cumulative earnings and the cumulative payout
+  ratio) and grouped into eras (2015-2019 pre-pandemic, 2020-2022
+  shock and rebound, 2023-2024 late, plus the full period). The annual
+  cuts show a mix that swings year to year; cumulation and era
+  aggregation test whether that swing survives averaging -- it mostly
+  does not: the era buyback share stays within about a point of 59-60%
+  even though the annual share ranges over 12 points.
 """
 
 import csv
@@ -193,6 +201,74 @@ def build_responsiveness(rows):
     return out
 
 
+def build_cumulative(rows):
+    """Running totals from the first year: payout vs earnings.
+
+    The cumulative payout ratio is the decade-to-date version of the
+    annual payout ratio in results.csv: total payout cumulated from
+    2015 divided by operating earnings cumulated over the same span.
+    Cumulation smooths the annual bounce (77-108%) into the question
+    of whether the decade as a whole paid out more than it earned.
+    """
+    out = []
+    cum_div = cum_buy = cum_earn = 0.0
+    for r in rows:
+        cum_div += r["dividends_$B"]
+        cum_buy += r["buybacks_$B"]
+        cum_earn += r["_op_earnings_$B"]
+        cum_total = cum_div + cum_buy
+        out.append({
+            "year": r["year"],
+            "cumulative_dividends_$B": round(cum_div, 2),
+            "cumulative_buybacks_$B": round(cum_buy, 2),
+            "cumulative_total_payout_$B": round(cum_total, 2),
+            "cumulative_operating_earnings_$B": round(cum_earn, 2),
+            "cumulative_payout_ratio_pct": round(cum_total / cum_earn * 100, 1),
+            "cumulative_buyback_share_pct": round(cum_buy / cum_total * 100, 1),
+        })
+    return out
+
+
+# Era boundaries follow the shocks in the series, not round numbers:
+# the pre-pandemic run, the 2020 earnings/payout shock plus the 2021-
+# 2022 rebound, and the two late years after the rebound faded.
+ERAS = [
+    ("2015-2019_pre_pandemic", 2015, 2019),
+    ("2020-2022_shock_and_rebound", 2020, 2022),
+    ("2023-2024_late", 2023, 2024),
+    ("2015-2024_full_period", 2015, 2024),
+]
+
+
+def build_eras(rows, eras=ERAS):
+    """Era totals: payout mix and payout ratio with the years pooled.
+
+    Pooling is the point: an era's buyback share is total era buybacks
+    over total era payout (a dollar-weighted mix), not the average of
+    the annual shares, so big-payout years count for more -- the same
+    way the decade total in v1 is computed.
+    """
+    out = []
+    for name, start, end in eras:
+        sel = [r for r in rows if start <= r["year"] <= end]
+        div = sum(r["dividends_$B"] for r in sel)
+        buy = sum(r["buybacks_$B"] for r in sel)
+        earn = sum(r["_op_earnings_$B"] for r in sel)
+        total = div + buy
+        out.append({
+            "era": name,
+            "years": len(sel),
+            "dividends_$B": round(div, 2),
+            "buybacks_$B": round(buy, 2),
+            "total_payout_$B": round(total, 2),
+            "operating_earnings_$B": round(earn, 2),
+            "buyback_share_pct": round(buy / total * 100, 1),
+            "payout_ratio_op_earnings_pct": round(total / earn * 100, 1),
+            "avg_annual_payout_$B": round(total / len(sel), 2),
+        })
+    return out
+
+
 def fred_sp500_check():
     """Lightweight sanity check that FRED is reachable and returns S&P 500
     data (daily close, series SP500). This is context only -- the payout
@@ -222,6 +298,8 @@ def main():
     growth = build_growth(rows)
     counter = build_counterfactual(rows)
     response = build_responsiveness(rows)
+    cumulative = build_cumulative(rows)
+    eras = build_eras(rows)
 
     div_g = [g["dividend_growth_pct"] for g in growth]
     buy_g = [g["buyback_growth_pct"] for g in growth]
@@ -244,6 +322,8 @@ def main():
     _write_csv(os.path.join(HERE, "growth.csv"), growth)
     _write_csv(os.path.join(HERE, "counterfactual.csv"), counter)
     _write_csv(os.path.join(HERE, "responsiveness.csv"), response)
+    _write_csv(os.path.join(HERE, "cumulative.csv"), cumulative)
+    _write_csv(os.path.join(HERE, "eras.csv"), eras)
 
     # Chart 1: stacked payout mix over time (unchanged from v1).
     years = [r["year"] for r in rows]
@@ -309,6 +389,28 @@ def main():
     fig.savefig(os.path.join(HERE, "responsiveness.png"), dpi=150)
     plt.close(fig)
 
+    # Chart 4: cumulative payout vs cumulative earnings, and the
+    # cumulative payout ratio settling as the decade cumulates (v4).
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    ax1.plot(years, [c["cumulative_total_payout_$B"] for c in cumulative],
+             marker="o", color="#333333", label="Cumulative total payout")
+    ax1.plot(years,
+             [c["cumulative_operating_earnings_$B"] for c in cumulative],
+             marker="s", color="#2ca02c",
+             label="Cumulative operating earnings")
+    ax1.set_ylabel("$ billions")
+    ax1.set_title("Cumulative payout vs cumulative earnings, 2015-2024")
+    ax1.legend()
+    ax2.plot(years, [c["cumulative_payout_ratio_pct"] for c in cumulative],
+             marker="o", color="#333333")
+    ax2.axhline(100, color="gray", linestyle="--", linewidth=0.8)
+    ax2.set_ylabel("Cumulative payout ratio, %")
+    ax2.set_xlabel("Calendar year")
+    ax2.set_xticks(years)
+    fig.tight_layout()
+    fig.savefig(os.path.join(HERE, "cumulative.png"), dpi=150)
+    plt.close(fig)
+
     print("\nHeadline numbers:")
     print(f"  Total payout 2024: ${rows[-1]['total_payout_$B']:,.1f}B "
           f"(record; dividends ${rows[-1]['dividends_$B']:,.1f}B, "
@@ -350,14 +452,32 @@ def main():
           f"{resp['buybacks']['avg_growth_earnings_down_pct']:+.1f}% while "
           f"dividends averaged "
           f"{resp['dividends']['avg_growth_earnings_down_pct']:+.1f}%")
+    era_by_name = {e["era"]: e for e in eras}
+    era_shares = [era_by_name[n]["buyback_share_pct"] for n, _, _ in ERAS[:3]]
+    print(f"  Cumulative / eras: decade payout "
+          f"${cumulative[-1]['cumulative_total_payout_$B']:,.2f}B vs "
+          f"cumulative earnings "
+          f"${cumulative[-1]['cumulative_operating_earnings_$B']:,.2f}B "
+          f"(cumulative payout ratio "
+          f"{cumulative[-1]['cumulative_payout_ratio_pct']:.1f}%, down "
+          f"from {cumulative[0]['cumulative_payout_ratio_pct']:.1f}% in "
+          f"2015 alone); era buyback shares "
+          f"{era_shares[0]:.1f}% / {era_shares[1]:.1f}% / "
+          f"{era_shares[2]:.1f}% (pre-pandemic / shock+rebound / late) "
+          f"vs an annual range of "
+          f"{min(r['buyback_share_pct'] for r in rows):.1f}-"
+          f"{max(r['buyback_share_pct'] for r in rows):.1f}%; era payout "
+          f"ratios {era_by_name[ERAS[0][0]]['payout_ratio_op_earnings_pct']:.1f}% "
+          f"-> {era_by_name[ERAS[1][0]]['payout_ratio_op_earnings_pct']:.1f}% "
+          f"-> {era_by_name[ERAS[2][0]]['payout_ratio_op_earnings_pct']:.1f}%")
     print("\n  FRED context check:")
     check = fred_sp500_check()
     if check:
         print(f"  {check[0]}: {check[3]} daily observations, "
               f"{check[1]} to {check[2]} (sanity context only)")
     print("\nWrote results.csv, growth.csv, counterfactual.csv, "
-          "responsiveness.csv, results.png, counterfactual.png and "
-          "responsiveness.png")
+          "responsiveness.csv, cumulative.csv, eras.csv, results.png, "
+          "counterfactual.png, responsiveness.png and cumulative.png")
 
 
 if __name__ == "__main__":
