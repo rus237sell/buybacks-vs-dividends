@@ -4,7 +4,8 @@ import unittest
 
 from buybacks_vs_dividends import (
     ERAS, PAYOUT, build_counterfactual, build_cumulative, build_eras,
-    build_growth, build_responsiveness, build_rows, public_rows,
+    build_growth, build_responsiveness, build_retention,
+    build_retention_eras, build_rows, public_rows,
 )
 
 
@@ -273,6 +274,88 @@ class TestCumulativeEras(unittest.TestCase):
                                (div + buy) / earn * 100, places=0)
         self.assertAlmostEqual(era["avg_annual_payout_$B"],
                                (div + buy) / 5, places=1)
+
+
+class TestRetention(unittest.TestCase):
+    def setUp(self):
+        self.rows = build_rows()
+        self.ret = build_retention(self.rows)
+        self.by_year = {r["year"]: r for r in self.ret}
+        self.eras = build_retention_eras(self.rows)
+        self.by_era = {e["era"]: e for e in self.eras}
+
+    def test_retention_ratio_complements_payout_ratio(self):
+        for ret, row in zip(self.ret, self.rows):
+            self.assertAlmostEqual(
+                ret["retention_ratio_pct"]
+                + row["payout_ratio_op_earnings_pct"], 100.0, places=0)
+            self.assertAlmostEqual(
+                ret["retained_$B"],
+                row["_op_earnings_$B"] - row["total_payout_$B"], places=1)
+
+    def test_only_2015_2016_overpaid(self):
+        over = [r["year"] for r in self.ret if r["over_payout"] == "yes"]
+        self.assertEqual(over, [2015, 2016])
+        self.assertAlmostEqual(self.by_year[2015]["retained_$B"],
+                               -69.10, places=1)
+        self.assertAlmostEqual(self.by_year[2015]["retention_ratio_pct"],
+                               -7.8, places=0)
+
+    def test_cumulative_trough_and_turn(self):
+        trough = min(self.ret, key=lambda r: r["cumulative_retained_$B"])
+        self.assertEqual(trough["year"], 2016)
+        self.assertAlmostEqual(trough["cumulative_retained_$B"],
+                               -82.84, places=1)
+        # The balance first turns positive at end-2017 and never
+        # goes negative again.
+        self.assertAlmostEqual(self.by_year[2017]["cumulative_retained_$B"],
+                               43.99, places=1)
+        for r in self.ret:
+            if r["year"] >= 2017:
+                self.assertGreater(r["cumulative_retained_$B"], 0)
+
+    def test_decade_retained(self):
+        self.assertAlmostEqual(self.ret[-1]["cumulative_retained_$B"],
+                               1507.11, places=1)
+        full = self.by_era[ERAS[-1][0]]
+        self.assertAlmostEqual(full["retained_$B"], 1507.11, places=1)
+        self.assertAlmostEqual(full["retention_ratio_pct"], 11.0,
+                               places=0)
+        self.assertEqual(full["over_payout_years"], 2)
+
+    def test_era_retention_rises_monotonically(self):
+        ratios = [self.by_era[name]["retention_ratio_pct"]
+                  for name, _, _ in ERAS[:3]]
+        self.assertAlmostEqual(ratios[0], 2.8, places=0)
+        self.assertAlmostEqual(ratios[1], 12.5, places=0)
+        self.assertAlmostEqual(ratios[2], 21.3, places=0)
+        self.assertEqual(ratios, sorted(ratios))
+        parts = [e for e in self.eras if e["era"] != ERAS[-1][0]]
+        self.assertAlmostEqual(
+            sum(e["retained_$B"] for e in parts),
+            self.by_era[ERAS[-1][0]]["retained_$B"], places=1)
+
+    def test_dividends_alone_never_overpay(self):
+        # The attribution check: in every year dividends alone were
+        # well under earnings, so over-payout needs the buyback leg.
+        for r in self.rows:
+            self.assertLess(r["dividends_vs_op_pct"], 50.0)
+        self.assertAlmostEqual(
+            max(r["dividends_vs_op_pct"] for r in self.rows), 47.4,
+            places=0)
+
+    def test_synthetic_hand_math(self):
+        rows = build_rows([
+            (2000, 40.0, 70.0, 100.0),
+            (2001, 40.0, 40.0, 100.0),
+        ])
+        ret = build_retention(rows)
+        self.assertAlmostEqual(ret[0]["retained_$B"], -10.0, places=1)
+        self.assertEqual(ret[0]["over_payout"], "yes")
+        self.assertAlmostEqual(ret[1]["retained_$B"], 20.0, places=1)
+        self.assertAlmostEqual(ret[1]["cumulative_retained_$B"], 10.0,
+                               places=1)
+        self.assertEqual(ret[1]["over_payout"], "no")
 
 
 if __name__ == "__main__":

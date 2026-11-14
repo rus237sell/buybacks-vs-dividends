@@ -37,6 +37,13 @@ Findings hinge on four derived measures:
   aggregation test whether that swing survives averaging -- it mostly
   does not: the era buyback share stays within about a point of 59-60%
   even though the annual share ranges over 12 points.
+- retention lens (v5): the complement of the payout ratio -- operating
+  earnings minus total payout, per year and cumulated, plus the same
+  pooling by era. A payout ratio above 100% means the index paid out
+  more than it earned that year; retention makes that concrete in
+  dollars and shows when the cumulative balance turned. Dividends
+  alone never took more than 47.4% of earnings in any year, so every
+  over-payout year is arithmetically a buyback story.
 """
 
 import csv
@@ -269,6 +276,58 @@ def build_eras(rows, eras=ERAS):
     return out
 
 
+def build_retention(rows):
+    """Retained operating earnings: what was left after total payout.
+
+    retained = operating earnings - total payout, so the retention
+    ratio is exactly 100 minus the payout ratio in results.csv. A
+    negative year is an over-payout year: the index returned more
+    than it earned, funded from prior retention or the balance sheet.
+    The cumulative column is the running retained balance from 2015.
+    """
+    out = []
+    cum = 0.0
+    for r in rows:
+        earn = r["_op_earnings_$B"]
+        retained = earn - r["total_payout_$B"]
+        cum += retained
+        out.append({
+            "year": r["year"],
+            "operating_earnings_$B": round(earn, 2),
+            "total_payout_$B": r["total_payout_$B"],
+            "retained_$B": round(retained, 2),
+            "retention_ratio_pct": round(retained / earn * 100, 1),
+            "cumulative_retained_$B": round(cum, 2),
+            "over_payout": "yes" if retained < 0 else "no",
+        })
+    return out
+
+
+def build_retention_eras(rows, eras=ERAS):
+    """Era-pooled retention: era earnings minus era payout.
+
+    Pooling is dollar-weighted, as in build_eras: an era's retention
+    ratio is its pooled retained dollars over its pooled earnings,
+    not the average of the annual ratios.
+    """
+    by_year = {r["year"]: r for r in build_retention(rows)}
+    out = []
+    for name, start, end in eras:
+        sel = [by_year[y] for y in sorted(by_year) if start <= y <= end]
+        earn = sum(s["operating_earnings_$B"] for s in sel)
+        retained = sum(s["retained_$B"] for s in sel)
+        out.append({
+            "era": name,
+            "years": len(sel),
+            "operating_earnings_$B": round(earn, 2),
+            "retained_$B": round(retained, 2),
+            "retention_ratio_pct": round(retained / earn * 100, 1),
+            "over_payout_years": sum(
+                1 for s in sel if s["over_payout"] == "yes"),
+        })
+    return out
+
+
 def fred_sp500_check():
     """Lightweight sanity check that FRED is reachable and returns S&P 500
     data (daily close, series SP500). This is context only -- the payout
@@ -300,6 +359,8 @@ def main():
     response = build_responsiveness(rows)
     cumulative = build_cumulative(rows)
     eras = build_eras(rows)
+    retention = build_retention(rows)
+    retention_eras = build_retention_eras(rows)
 
     div_g = [g["dividend_growth_pct"] for g in growth]
     buy_g = [g["buyback_growth_pct"] for g in growth]
@@ -324,6 +385,8 @@ def main():
     _write_csv(os.path.join(HERE, "responsiveness.csv"), response)
     _write_csv(os.path.join(HERE, "cumulative.csv"), cumulative)
     _write_csv(os.path.join(HERE, "eras.csv"), eras)
+    _write_csv(os.path.join(HERE, "retention.csv"), retention)
+    _write_csv(os.path.join(HERE, "retention_eras.csv"), retention_eras)
 
     # Chart 1: stacked payout mix over time (unchanged from v1).
     years = [r["year"] for r in rows]
@@ -411,6 +474,25 @@ def main():
     fig.savefig(os.path.join(HERE, "cumulative.png"), dpi=150)
     plt.close(fig)
 
+    # Chart 5: annual retained earnings (red when the year paid out
+    # more than it earned) and the cumulative retained balance (v5).
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    retained = [r["retained_$B"] for r in retention]
+    ax1.bar(years, retained,
+            color=["#d62728" if v < 0 else "#2ca02c" for v in retained])
+    ax1.axhline(0, color="black", linewidth=0.8)
+    ax1.set_ylabel("Retained, $ billions")
+    ax1.set_title("Operating earnings retained after payout, 2015-2024")
+    ax2.plot(years, [r["cumulative_retained_$B"] for r in retention],
+             marker="o", color="#333333")
+    ax2.axhline(0, color="black", linewidth=0.8)
+    ax2.set_ylabel("Cumulative retained, $B")
+    ax2.set_xlabel("Calendar year")
+    ax2.set_xticks(years)
+    fig.tight_layout()
+    fig.savefig(os.path.join(HERE, "retention.png"), dpi=150)
+    plt.close(fig)
+
     print("\nHeadline numbers:")
     print(f"  Total payout 2024: ${rows[-1]['total_payout_$B']:,.1f}B "
           f"(record; dividends ${rows[-1]['dividends_$B']:,.1f}B, "
@@ -470,14 +552,37 @@ def main():
           f"ratios {era_by_name[ERAS[0][0]]['payout_ratio_op_earnings_pct']:.1f}% "
           f"-> {era_by_name[ERAS[1][0]]['payout_ratio_op_earnings_pct']:.1f}% "
           f"-> {era_by_name[ERAS[2][0]]['payout_ratio_op_earnings_pct']:.1f}%")
+    over = [r for r in retention if r["over_payout"] == "yes"]
+    trough = min(retention, key=lambda r: r["cumulative_retained_$B"])
+    first_pos = next(r for r in retention
+                     if r["cumulative_retained_$B"] > 0)
+    ret_era = {e["era"]: e for e in retention_eras}
+    print(f"  Retention: decade retained "
+          f"${retention[-1]['cumulative_retained_$B']:,.2f}B "
+          f"({ret_era[ERAS[-1][0]]['retention_ratio_pct']:.1f}% of "
+          f"earnings); over-payout years "
+          f"{[r['year'] for r in over]} totaling "
+          f"${sum(r['retained_$B'] for r in over):,.2f}B, cumulative "
+          f"retained trough ${trough['cumulative_retained_$B']:,.2f}B "
+          f"at end-{trough['year']}, first positive at end-"
+          f"{first_pos['year']} "
+          f"(${first_pos['cumulative_retained_$B']:,.2f}B); era "
+          f"retention ratios "
+          f"{ret_era[ERAS[0][0]]['retention_ratio_pct']:.1f}% -> "
+          f"{ret_era[ERAS[1][0]]['retention_ratio_pct']:.1f}% -> "
+          f"{ret_era[ERAS[2][0]]['retention_ratio_pct']:.1f}%; dividends "
+          f"alone never took more than "
+          f"{max(r['dividends_vs_op_pct'] for r in rows):.1f}% of "
+          f"earnings in any year")
     print("\n  FRED context check:")
     check = fred_sp500_check()
     if check:
         print(f"  {check[0]}: {check[3]} daily observations, "
               f"{check[1]} to {check[2]} (sanity context only)")
     print("\nWrote results.csv, growth.csv, counterfactual.csv, "
-          "responsiveness.csv, cumulative.csv, eras.csv, results.png, "
-          "counterfactual.png, responsiveness.png and cumulative.png")
+          "responsiveness.csv, cumulative.csv, eras.csv, retention.csv, "
+          "retention_eras.csv, results.png, counterfactual.png, "
+          "responsiveness.png, cumulative.png and retention.png")
 
 
 if __name__ == "__main__":
